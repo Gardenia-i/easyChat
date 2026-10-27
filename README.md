@@ -1,366 +1,159 @@
-# easyChat （点击[下载](https://github.com/LTEnjoy/easyChat/releases/latest)最新exe程序）
+# easyChat：微信群消息发送模块
 
-PC端微信助手（非web微信版）：定时发送信息；群发信息；自动回复等。直接下载最新的exe即可使用。
+本项目提供 Python 发送函数和本地 HTTP 联调服务。调用方负责单据比对、确定要 @ 的人和生成消息正文；本模块操作 Windows 桌面微信，向指定群聊发送文字及图片。
 
-最新编辑日期：2026/09/15
+旧版 GUI、定时发送和自动回复代码仍保留在仓库中供迁移参考，但不在新发送入口的调用链中。旧说明见 [README.legacy.md](README.legacy.md)。
 
-有疑问推荐在Issues上提出以供他人参考。
+## 安装与前提
 
-个人邮箱：[sujinltenjoy@gmail.com](mailto:sujinltenjoy@gmail.com)。
+- Windows、已登录的桌面微信、可交互的用户桌面。不能在无桌面的服务会话中使用。
+- Python 3.10 或以上；安装依赖：`pip install -r requirements-sender.txt`。
+- 微信“显示/隐藏窗口”快捷键与 `SenderConfig.hotkey` 一致。4.1.15.56 的控件树如果未暴露，服务会尝试热激活。
+- 建议使用专门负责自动发送的微信会话。发送前会清空当前输入框草稿，避免上一次失败留下的文字混入新消息。
+- 内置配置：微信 4.1.15.56（默认）、4.1.15.8、4.1.9.21、4.1.8.107。4.1.15.56 的控件锚点取自本机实测控件树；其他版本保留原项目的定位配置，发送仍需在对应客户端验证。
 
-如果有帮到您的话，麻烦顺手点个star~
+微信 4.1.15.56 在本机未热激活时只暴露 `Qt51514QWindowIcon` 外壳。发送前若检测到这种情况，服务会调用随项目固定的 [上游 UIA 热激活脚本](vendor/wechatauto_replica/README.md)：扫描当前 `Weixin.dll`，尝试修改运行中微信进程内的无障碍标志，再检查 `mmui::` 控件树。激活失败时返回 `wechat_uia_activation_failed`，不会继续发送。微信彻底重启后会在下次请求时重新检查。该步骤会写入微信进程内存。
 
-## 目录
-- [更新日志](#更新日志)
-- [前言](#前言)
-- [支持功能](#支持功能)
-- [文件说明](#文件说明)
-- [图形界面](#图形界面)
-- [使用步骤](#使用步骤)
-- [友情赞助](#友情赞助)
+本机验证过热激活后的主界面、搜索界面和 @ 候选界面控件树（分别为 151、166 和 155 个控件）；4.1.15.56 的搜索、@ 和发送定位已据此实现。**完整的文字、@、图片发送尚未实机验证成功**，请先在测试群联调。最近一次实机请求在清空草稿时遇到不受 `uiautomation` 支持的 `{Backspace}` 键名，已改为受支持的 `{Delete}`；这次请求发送数为 0。
 
-## 更新日志
+可先单独诊断：`python -X utf8 vendor/wechatauto_replica/wake_uia.py --status` 只读状态；`python -X utf8 vendor/wechatauto_replica/wake_uia.py --cache diagnostics/gate_cache.json` 尝试激活并校验。运行这两条命令时，微信主窗口需处于可见状态。激活成功后，运行下文的控件树采集脚本查看实际控件结构。
 
-#### 2026/09/15
+## Python 调用
 
-- 添加了对微信4.1.15版本的支持。
+```python
+from sender import SenderConfig, SenderService, send_group_message
 
-#### 2026/06/24
+payload = {
+    "request_id": "compare-20261027-001",
+    "group_name": "资产核对群",
+    "at_users": ["张三", "李四"],
+    "content": "两张单子的对比结果：新增 2 条，变更 3 条。",
+    "images": [],
+}
 
-- 在发送间隔和搜索等待时间处增加一个时间随机的功能。
+# 使用默认配置（微信 4.1.15.56、Ctrl+Alt+W）
+result = send_group_message(payload)
 
-#### 2026/05/26
+# 需要其他已适配版本或快捷键时，复用一个 SenderService 实例
+service = SenderService(SenderConfig(
+    version="微信 4.1.9.21",
+    hotkey="{Ctrl}{Alt}e",
+    locale="zh-CN",
+))
+result = service.send_group_message(payload)
+```
 
-- 修复了搜索好友不存在时误发送的问题。
+`content` 是正文，真正的群 @ 由 `at_users` 单独指定。`images` 中每项是 `filename` 和 `data_base64`；最多 5 张，每张不超过 8 MB，支持 PNG、JPEG、WEBP、BMP。服务先发送文本消息（包含 @），再按顺序分别发送图片消息。可只发图片，此时 `at_users` 必须为空。一次调用只发送到一个群。`request_id` 可省略；提供后，同一运行目录的 `sender_state.sqlite3` 会记录其状态，同一个编号不会再次执行。若同编号用于不同内容，返回 `invalid_request`。
 
-<details><summary><b>展开</b></summary>
+## 本地联调页面与 HTTP 接口
 
-#### 2026/05/18
+在项目目录运行：
 
-- 修复了折叠群聊无法发送信息的bug。
+```powershell
+python -m pip install -r requirements-sender.txt
+python server.py --version "微信 4.1.15.56" --log-level DEBUG
+```
 
-#### 2026/04/19
+浏览器打开 `http://127.0.0.1:8765/`，即可填写群名、@ 人员、正文并选择图片。页面会调用 `POST /api/send`，返回 JSON。先访问 `http://127.0.0.1:8765/api/health`，确认 `version` 是实际使用的微信版本。每次重试请生成新的 `request_id`，并先核对上一次是否已部分发送。
 
-- 现在支持手动设置微信打开的热键。
+不经过页面时，也可用 Python 发出一个仅含文字的本地联调请求：
 
-#### 2026/04/17
+```python
+import json
+import urllib.request
 
-- 新增多微信版本兼容支持。程序现在可以根据用户在界面中选择的微信版本自动加载对应实现，今后微信更新时不同版本的用户可以各自选择对应版本，无需被迫统一升级。
+payload = {
+    "request_id": "test-001",
+    "group_name": "测试群",
+    "at_users": ["张三"],
+    "content": "联调消息",
+    "images": [],
+}
+request = urllib.request.Request(
+    "http://127.0.0.1:8765/api/send",
+    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    headers={"Content-Type": "application/json; charset=utf-8"},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    print(json.load(response))
+```
 
-#### 2026/04/09
+服务同时把关键步骤打印在启动它的终端，并写入 `logs/easychat.log`（5 MB 轮转）。日志记录请求编号、微信版本、前台进程和控件类、群搜索、@ 候选、发送进度与错误；不会记录正文或图片数据。要看每次随机等待，使用 `python server.py --log-level DEBUG`。修改代码后需重启服务，再用**新的请求编号**做联调。
 
-- 修复了“防止自动下线“开启时导致的程序闪退问题。
+若返回 `wechat_not_ready`，先看日志中的 `activation_initial`、`activation_hotkey` 和 `activation_no_focus`：它们会显示快捷键执行前后的前台进程与控件类。确认微信已经登录，并使 `--hotkey` 与微信设置中的“显示/隐藏窗口”一致。当前程序同时检查焦点控件的父级和前台进程名，避免焦点落在微信子控件时误报。
 
-#### 2026/03/26
+## 采集微信 4.1.15.56 控件树
 
-- 更新了程序，现在最新版仅支持微信4.1.8版本及以上。 
+在交互式 PowerShell 中运行以下命令。每条命令开始后有 10–15 秒倒计时；倒计时期间切到微信并准备对应界面，脚本只读取控件，不会点击或发送：
 
-#### 2026/03/23
+```powershell
+python inspect_wechat_ui.py --label main --delay 10 --target '测试群' --member '张三'
+python inspect_wechat_ui.py --label search --delay 15 --target '测试群' --member '张三'
+python inspect_wechat_ui.py --label mention --delay 15 --target '测试群' --member '张三'
+```
 
-- 添加了定时任务出错时的报错提醒 https://github.com/LTEnjoy/easyChat/issues/162 。 
+- `main`：显示微信主聊天界面。
+- `search`：在微信搜索框输入目标群名，保持搜索结果可见。
+- `mention`：进入目标群，在消息框输入 `@成员名`，保持候选列表可见，**不要按回车或发送**。
 
-#### 2026/03/09
+输出保存在 `diagnostics/` 下的三个 UTF-8 文本文件。默认只保留常见按钮文字，其余名称会遮蔽；命令中提供的群名和成员名会显示为 `<TARGET>`、`<MEMBER>`。分享前仍请检查文件内容。若只采到 10 个以内的控件，先用上面的热激活命令恢复 `mmui::` 控件树，再重跑采集。
 
-- 修复了程序打开微信时会弹出新的登录界面的问题，现在采取了全新的打开微信方式。
-
-#### 2026/02/24
-
-- 修复了定时发送时会发送过期的定时任务问题。
-
-#### 2026/01/30
-
-- 修复了获取微信好友列表时自动停止的问题。
-
-#### 2026/01/27
-
-- 现在用户上传文件支持多选文件，节省效率。
-
-#### 2025/12/07
-
-- 实现了在微信新版本下的提取联系人列表和群聊列表的功能。
-
-#### 2025/12/02
-
-- 修复了群聊因为无法展示在搜索第一行导致无法发送信息的问题，现在搜索将自动忽略搜索栏目。
-
-#### 2025/11/28
-
-- 现在easyChat支持微信4.1版本,原来的3.9版本已被弃用🥳🥳🥳。
-
-#### 2025/08/30
-
-- 优化了定时发送功能，见 https://github.com/LTEnjoy/easyChat/pull/126 。 感谢[@wustghj](https://github.com/wustghj)。
-
-#### 2025/05/30
-
-- 修正了定时时多余空格导致的格式问题，见 https://github.com/LTEnjoy/easyChat/issues/113 。
-
-#### 2025/05/10
-
-- 增加了获取当前对话人昵称的函数``get_current_name()``，见 https://github.com/LTEnjoy/easyChat/issues/112 。
-
-#### 2025/03/29
-
-- 将发送信息与@他人的功能合并为一个函数，允许用户在@他人的同时发送信息，见 https://github.com/LTEnjoy/easyChat/issues/104 。感谢[@Halogly](https://github.com/Halogly)提供的灵感。
-
-
-#### 2025/03/15
-
-- 增加了配置文件的自动更新，现在**用户的所有操作都会被自动存储并且自动加载**，不用担心重启程序后之前的操作丢失。感谢[@Mcayear](https://github.com/Mcayear)提供的灵感。
-
-
-#### 2025/02/14
-- 修复了获取微信全部好友功能的bug。
-
-#### 2025/01/17
-- 增加了对exe程序自适应屏幕尺寸的支持，现在可以在不同分辨率的屏幕上正常显示。
-
-#### 2024/11/19
-- 增加了exe程序对微信多种语言模式的支持（简体中文，繁体中文以及英文）。
-- 现在获取微信好友列表的同时还能够获取他们的备注名以及标签，方便后续根据标签群发好友。
-
-#### 2024/10/17
-- 修复了当其中一个联系人发送失败时影响后续所有发送的bug， 见 https://github.com/LTEnjoy/easyChat/issues/73 。
-
-#### 2024/09/17
-- 现在支持代码层面根据时间信息分块获取聊天记录,见https://github.com/LTEnjoy/easyChat/pull/70 。感谢[@宇宇](https://github.com/xieyumc)。
-
-#### 2024/08/16
-- 现在支持一条信息换行发送，可以在输入内容时使用“\n”进行换行，例如：“你好\n我是xx”。
-
-#### 2024/08/13
-- 加入了判断消息是否发送成功的返回值，见https://github.com/LTEnjoy/easyChat/pull/67 。感谢[@宇宇](https://github.com/xieyumc)。
-
-#### 2024/07/22
-- 现在可以一次性实现多个定时时间的输入，降低了重复操作的繁琐性。
-
-#### 2024/07/11
-- 上传了打包函数，用户现在可以自己打包exe文件。运行``python pack.py``即可。
-
-#### 2024/07/03
-
-- 增加了发送不同用户时的间隔时间选项，现在可以在发送不同用户时设置间隔时间（防止发送太频繁被强制下线）。
-
-#### 2024/07/02
-
-- 增加了保存所有群聊名称的功能按钮。
-
-#### 2024/06/28
-
-- 优化了发送信息的逻辑，现在对同一用户发送信息只需要搜索用户一次即可全部发送。
-
-#### 2024/05/08
-
-- 修复了获取聊天记录时滚动条不显示时的逻辑bug，见 https://github.com/LTEnjoy/easyChat/pull/45 。感谢[@T-K-233](https://github.com/T-K-233)。
-
-#### 2024/05/03
-
-- 修改了防自动下线功能的间隔时间，现在每一小时触发一次,不会影响自动发送功能的正常使用。
-
-#### 2024/04/29
-
-- 增加了防止微信长时间挂机掉线的功能，要开启该功能直接点击“防止自动下线（目前关闭）”按钮。
-
-#### 2024/04/16
-
-- 目前定时功能支持自定义年月日，具体请看输入提示。
-
-#### 2023/12/28
-
-- 增加了对微信多种语言模式的支持（简体中文，繁体中文以及英文）。[@T-K-233](https://github.com/T-K-233)
-
-#### 2023/11/21
-
-- 完善了README.md文件。
-- 调整了自动获取信息的代码，支持用户自定义自动回复的代码。 （参考 https://github.com/LTEnjoy/easyChat/issues/33 ）
-
-#### 2023/11/17
-
-- 修复了获取聊天记录代码的报错。
-
-#### 2023/08/01
-
-- 修复了无法at他人的bug。
-
-#### 2023/07/24
-
-- 现在程序在无法发送时会进行报错，不会直接闪退。
-- 现在用户可以通过按下"ctrl + alt + q"来终止发送。
-
-#### 2023/07/22  
-
-- 现在代码调用方式支持存储聊天记录的图片和视频。
-
-#### 2023/07/19  
-
-- 对输入方式进行了优化。
-- 现在支持加载内容txt文件。
-- 现在一条信息可以指定用户发送而不是默认全部发送。
-
-#### 2023/06/21  
-
-- 现在ui界面支持读取微信联系人并存储成txt文件用于加载。
-
-#### 2023/06/20  
-
-- 修复了当好友数过少无法获取联系人的bug。
-
-#### 2023/06/13
-
-- 修复版本更新导致代码调用无法发送信息的bug。
-
-#### 2022/11/22	
-
-- 修正了文件版本更新混乱导致的出错问题。
-
-#### 2022/11/03	
-
-- 现在可以一次性添加多个人名，输入时通过英文逗号‘,’分隔即可。
-
-#### 2022/09/26	
-
-- 定时发送现在可以指定发送内容的范围（详情请使用最新版exe时看输入提示）。
-
-#### 2022/09/16	
-
-- 新增获取窗口聊天记录的功能（仅支持代码调用）。
-
-#### 2022/07/27	
-
-- 完成发送内容的优化，现在支持微信群@他人的操作
-
-#### 2022/07/07	
-
-- 完成发送内容的优化，现在支持一次定时按顺序发送多条信息。
-</details>
-
-## 前言
-
-之前使用过的itchat等工具都是基于web版网页微信的。自从网页微信无法登陆之后，之前的工具都失效了。因此，本人采用[uiautomation](https://github.com/yinkaisheng/Python-UIAutomation-for-Windows)对微信进行~~暴力~~操作，就有了本仓库。并且用~~自学了三年的图形界面水平~~写了个简易ui供大家使用。
-
-> 注意：请确保输入相应内容时严格按照示例的内容格式进行，以保证代码的正确执行。
-
-## 支持功能
-
-### 图形界面方式：
-
-- 群发消息
-- 定时发送消息
-- 自动回复（参考 https://github.com/LTEnjoy/easyChat/issues/33 ）
-
-> 注意事项：请在使用过程中严格遵守输入格式，否则程序会自动退出。（要去考虑一个个边界条件太麻烦了，我直接采取一个鸵鸟政策）。
-
-### 代码调用方式：
-
-- 搜索指定用户名的联系人发送信息，同时可在指定群聊中@他人 -> def send_msg()
-
-- 搜索指定用户名的联系人发送文件 -> def send_file()
-
-- 获取所有通讯录中所有联系人 -> def find_all_contacts()
-
-- 自动检测新消息 -> def check_new_msg()
-
-- 设置自动回复的联系人列表 -> def set_auto_reply()
-
-- 获取指定聊天窗口的聊天记录 -> def get_dialogs()
-
-- 获取指定聊天窗口的图片和视频 -> def save_dialog_pictures()
-
-> 注意事项：请进入 **versions/** 目录下对应你微信版本的文件内部进行调用（例如 `wechat_4_1_9_21.py`）。内部代码简易注释详尽，可以自由尝试。
-
-## 文件说明
-
-###### **pack.py**
-打包函数，用户直接运行``python pack.py``即可打包exe文件。
-
-###### **automation.py**
-可视化控件树的文件，针对希望DIY的用户，方便进行控件类型和深度的查看。
-
-###### **clipboard.py**
-提供了对文件的复制操作，调用函数即可将指定路径的文件复制到剪切板。
-
-###### **versions/**
-存放各微信版本对应的操作实现代码。每个文件以微信版本号命名（如 `wechat_4_1_9_21.py`），内含该版本下的完整 WeChat 操作实现，支持自由 DIY。`__init__.py` 为版本注册表，程序启动时根据用户在界面中选择的版本自动加载对应文件。
-
-###### **wechat_locale.py**
-提供了对微信多种语言的支持，可以根据自己的需要进行选择。
-
-###### **wechat_gui.py**
-是编写的图形界面，在图形界面中调用对微信的操作。由于本人太懒，直接放弃美工，后期边做边改吧。
-
-###### **module.py**
-
-控件模块，组成UI界面的小组件。
-
-###### **wechat_gui.exe**
-是打包好的exe程序，可以直接下载进行使用。也可以对**wechat_gui.py**进行打包生成exe文件。
-
-## 图形界面
-
-<img src="pictures/GUI.png" alt="GUI" style="zoom: 80%;" />
-
-			**图形界面示意图**
-
-## 使用步骤
-
-#### 基础操作
-
-1. 参考[这里](https://github.com/LTEnjoy/easyChat/releases/tag/easyChat_20251128(%E6%94%AF%E6%8C%81%E5%BE%AE%E4%BF%A14.1%E7%89%88%E6%9C%AC))通过打开“讲述人”模式让程序能够正确读取微信界面。
-
-2. 点击“选择微信打开路径”，在目录下选择微信的可执行exe文件。
-
-3. 点击“添加用户”，输入要发送信息的用户名（在搜索框第一个展示的名字，如下所示，注意现在输入群聊名称默认上方会有搜索栏目，程序会自动忽略，只要确保要发送的群聊在联系人中是第一个出现的即可）。
-
-   ![搜索示例](pictures/搜索示例.png)
-
-4. 点击文本框右侧的添加按钮，选择添加文本或文件。添加的内容会在发送时按添加的顺序一次发送。
-
-5. （可选）如果要进行定时发送，点击下方的“添加时间”按钮，按照规定的格式添加时间。随后点击“开始定时”，当时间达到列表中的指定时间时，便会将指定的消息发送给指定的用户。
-
-#### 微信群@他人
-
-1. 提前查看微信群里要@的人的名字
-
-   ![@他人](pictures/@他人.png)
-
-2. 在界面中填写你要@的人名
-
-   ![@他人添加](pictures/@他人添加.png)
-
-> 注意：@所有人时请确保拥有微信群@所有人的权限，否则将失败。
-
-#### 加载用户txt文件
-
-用户可以提前查看所有要发送的对象的名字，并存储在一个txt文件中，之后点击”加载用户txt文件“按钮，即可自动加载所有对象。
-
-用户txt文件格式如下：
-
-<img src="pictures/%E5%8A%A0%E8%BD%BD%E7%94%A8%E6%88%B7txt.png" alt="加载用户txt" style="zoom:50%;" />
-
-每一行都是一个对象的名字。
-
-#### 加载内容txt文件
-
-你可以提前写下要发送的内容，并存储在一个txt文件中，之后点击”加载内容txt文件“按钮，即可自动加载所有内容。
-如果在一条内容中想要进行换行，可以在内容中使用“\n”进行换行，例如：“你好\n我是xx”。
-
-> 注意事项：该方式仅支持发送文本内容
-
-内容txt文件格式如下：
-
-<img src="pictures/%E5%8A%A0%E8%BD%BD%E5%86%85%E5%AE%B9txt.png" alt="加载内容txt" style="zoom:50%;" />
-
-每一行都是一条内容消息。在输入内容之前，你需要先指定该条消息要发送给哪些对象：
-
-- 如果默认发送给所有对象，则输入all:，然后写上要发送的内容
-- 如果要发送给指定的对象，则输入用户的编号，多个用户之间用英文逗号分隔（如1,2,3），然后写上要发送的内容
-
-> 注意事项：不同列之间要用英文冒号进行分隔
-
-## 友情赞助
-
-如果你觉得这款应用不错的话，麻烦顺手点个star。也可以请作者喝杯奶茶，让我在日常生活中感受到一些小确幸~
-
-<img src="pictures/%E5%BE%AE%E4%BF%A1%E6%94%B6%E6%AC%BE%E7%A0%81.jpg" alt="微信收款码" style="zoom:25%;" />
-
-<img src="pictures/%E6%94%AF%E4%BB%98%E5%AE%9D%E6%94%B6%E6%AC%BE%E7%A0%81.jpg" alt="支付宝收款码" style="zoom:25%;" />
+其他程序也可直接发送 JSON：
+
+```json
+{
+  "request_id": "compare-001",
+  "group_name": "资产核对群",
+  "at_users": ["张三"],
+  "content": "本次单据对比发现 2 处差异。",
+  "images": [
+    {"filename": "差异截图.png", "data_base64": "<图片文件的 base64 内容>"}
+  ]
+}
+```
+
+服务默认只监听本机 `127.0.0.1:8765`。如需从其他机器访问，可设置环境变量 `EASYCHAT_API_TOKEN`，再用 `python server.py --host 0.0.0.0` 启动；请求头携带 `X-API-Token`。可用 `--version "微信 4.1.9.21"`、`--hotkey "{Ctrl}{Alt}e"` 和 `--locale en-US` 指定本机微信配置。
+
+## 返回结果
+
+返回字典始终包含 `request_id`、`ok`、`status`、`message`。正常执行时示例：
+
+```python
+{
+    "request_id": "compare-20261027-001",
+    "ok": True,
+    "status": "submitted",
+    "message": "所有消息均已在目标会话点击发送；当前无法确认对方是否收到",
+    "mention_selection": "ui_candidate_selected",
+    "sent_messages": 1,
+    "total_messages": 1,
+}
+```
+
+`submitted` 仅表示客户端发送按钮已点击，**不是送达或已读确认**。在 4.1.15.56 中，发送模块只从 `chat_mention_list` 弹层选取名称精确匹配的成员；旧版通过输入 @ 前后的候选差异定位。找不到或有多个同名候选时停止发送。真实 @ 仍须在测试群中验证。
+
+其他状态包括 `invalid_request`、`duplicate_request`、`group_not_found`、`group_ambiguous`、`mention_not_found`、`mention_ambiguous`、`mention_selection_uncertain`、`wechat_not_ready`、`wechat_uia_activation_failed`、`wechat_ui_changed`、`automation_unavailable`、`send_failed`、`partial_send`、`send_uncertain` 和 `state_error`。`partial_send` 表示前面的文字或图片已提交，后续消息失败；`send_uncertain` 表示某次发送点击结果无法确认。两者均不应直接用新编号重试整组内容。
+
+## 等待与并发
+
+- 每次微信界面操作前独立随机等待 2–10 秒。
+- 每条文字或图片消息点击发送前额外随机等待 2–6 秒。
+- 所有发送在进程内串行执行，因为微信窗口和系统剪贴板是共享资源。多个进程同时操作同一个桌面仍需由上层协调。
+
+等待范围可通过 `SenderConfig.action_delay_range` 和 `message_delay_range` 调整。随机等待会降低连续操作速度，但不能保证规避微信风控。一次调用可能耗时数十秒，接口层应配置相应超时或任务队列。
+
+## 代码分层
+
+| 文件 | 职责 |
+| --- | --- |
+| `sender.py` | 对外导入入口 |
+| `easychat_sender/contracts.py` | 输入校验和错误类型 |
+| `easychat_sender/delay.py` | 每步独立随机等待 |
+| `easychat_sender/profiles.py` | 微信版本配置与 4.1.15.56 的锚点定位开关 |
+| `easychat_sender/driver.py` | 唯一操作桌面微信的模块 |
+| `easychat_sender/uia_wake.py` | 控件树缺失时调用固定版本的热激活脚本 |
+| `easychat_sender/service.py` | 串行执行、请求编号去重、结构化返回 |
+| `server.py`、`web/index.html` | 本地 HTTP 接口和联调页面 |
+
+运行 `python -m pytest tests/test_sender.py` 可验证不操作真实微信的逻辑。真实发送需要在对应微信客户端中做集成验证。

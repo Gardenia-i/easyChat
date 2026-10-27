@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+sender_state.sqlite3
+sender_state.sqlite3-*
+.chrome-preview/
+preview.png
+logs/
+diagnostics/
+@AutomationLog.txt
